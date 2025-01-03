@@ -18,8 +18,28 @@ spec:
     metadata:
       labels:
         {{- include "pms-chart.labels" . | nindent 8 }}
+      annotations:
+        {{- toYaml .Values.statefulSet.podAnnotations | nindent 8 }}
     spec:
+      {{- if .Values.runtimeClassName }}
+      runtimeClassName: {{ .Values.runtimeClassName | quote }}
+      {{- end }}
+      serviceAccountName: {{ include "pms-chart.serviceAccountName" . }}
+      tolerations:
+        {{- toYaml .Values.tolerations | nindent 8 }}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- if .Values.priorityClassName }}
+      priorityClassName: {{ .Values.priorityClassName | quote }}
+      {{- end }}
       volumes:
+      {{- if .Values.pms.configExistingClaim }}
+      - name: pms-config
+        persistentVolumeClaim:
+          claimName: {{ .Values.pms.configExistingClaim | quote }}
+      {{- end }}
       - name: pms-transcode
         emptyDir: {}
       {{- if and .Values.rclone.enabled .Values.rclone.configSecret }}
@@ -65,11 +85,10 @@ spec:
       - name: {{ include "pms-chart.fullname" . }}-config
         image: {{ include "pms-chart.init_image" . }}
         command:
-          - cp
+          - sh
+          - -c
         args:
-          - -v
-          - /in/rclone.conf
-          - /out/rclone.conf
+          - cp -v /in/* /out/
         volumeMounts:
         - name: rclone-config-data
           mountPath: /in
@@ -87,16 +106,40 @@ spec:
         env:
         {{- if .Values.ingress.enabled }}
         - name: ADVERTISE_IP
-          value: {{ trimPrefix "https://" .Values.ingress.url }}
+          value: {{ .Values.ingress.url }}:443
         {{- end }}
         {{- range $key, $value := .Values.extraEnv }}
         - name: {{ $key }}
-          value: {{ $value }}
+          value: {{ $value | quote }}
+        {{- end }}
+        {{- if .Values.pms.gpu.nvidia.enabled }}
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: all
+        - name: NVIDIA_DRIVER_CAPABILITIES
+          value: compute,video,utility
+        {{- end }}
+        {{- with .Values.pms.livenessProbe }}
+        livenessProbe:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- with .Values.pms.readinessProbe }}
+        readinessProbe:
+          {{- toYaml . | nindent 10 }}
         {{- end }}
         {{- with .Values.pms.resources }}
         resources:
-{{ toYaml . | indent 10 }}
-      {{- end }}
+          limits:
+          {{- with .limits }}
+            {{ toYaml . | indent 12 | trim }}
+          {{- end }}
+          {{- if and $.Values.pms.gpu.nvidia.enabled (not (hasKey .limits "nvidia.com/gpu")) }}
+            nvidia.com/gpu: 1
+          {{- end }}
+          {{- if .requests }}
+          requests:
+            {{ toYaml .requests | indent 12 | trim }}
+          {{- end }}
+        {{- end }}
         volumeMounts:
         - name: pms-config
           mountPath: /config
@@ -137,7 +180,7 @@ spec:
         lifecycle:
           preStop:
             exec:
-              command: ["/bin/sh","-c","fusermount -uz /data/{{ (split ":" .)._0 }}"]
+              command: ["/bin/sh","-c","fusermount3 -uz /data/{{ (split ":" .)._0 }}"]
         securityContext:
           privileged: true
           capabilities:
@@ -154,12 +197,7 @@ spec:
       {{- with .Values.extraContainers }}
 {{- toYaml . | nindent 6 }}
       {{- end }}
-  nodeSelector:
-    {{- toYaml .Values.nodeSelector | nindent 4 }}
-  affinity:
-    {{- toYaml .Values.affinity | nindent 4 }}
-  tolerations:
-    {{- toYaml .Values.tolerations | nindent 4 }}
+  {{- if not .Values.pms.configExistingClaim }}
   volumeClaimTemplates:
   - metadata:
       name: pms-config
@@ -171,3 +209,4 @@ spec:
       resources:
         requests:
           storage: {{ .Values.pms.configStorage }}
+  {{- end }}
